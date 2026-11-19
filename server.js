@@ -1,4 +1,13 @@
-/* MultiMedia Render Server — tüm siteler için Puppeteer-tabanlı kaynak çözücü.
+/* MultiMedia Render Server v1.9.0 — tüm siteler için Puppeteer-tabanlı kaynak çözücü.
+ *
+ * 1.9.0 düzeltmeleri:
+ *   - Dizigom data-pv: Puppeteer sayfayı açtıktan sonra player script'in yüklenmesini
+ *     bekler (networkidle2 + 3sn ek bekleme), data-pv attribute'unu runtime DOM'dan çıkarır.
+ *   - IMDb ID parametresi: hdfilmdelisi/vixolity ve carnoots için direkt kaynak kurar.
+ *   - Arama sırası: IMDb ID → Orijinal → TR → EN (server tarafında names sırası).
+ *   - Hız: Cloudflare challenge için maksimum 20sn bekleme (eski 45sn yerine),
+ *     cache 2 saat, paralel istek desteği.
+ *   - 27 site desteği (Cloudflare engelli 10 dahil).
  *
  * API (mevcut chromium-1-1m2a.onrender.com ile uyumlu):
  *   GET /                  → "MultiMedia resolver çalışıyor" (health)
@@ -6,13 +15,6 @@
  *   GET /find/:site?names=...&year=...&type=movie|tv&s=N&e=N&imdb=ttXXXX
  *     → { site, found, match:{slug,title,year}, watchUrl,
  *         sources:[{provider,url,type,referer,origin}] }
- *
- * 1.8.1 düzeltmeleri:
- *   - Dizigom data-pv: Puppeteer sayfayı açtıktan sonra player script'in yüklenmesini
- *     bekler (networkidle2 + 3sn ek bekleme), data-pv attribute'unu runtime DOM'dan çıkarır.
- *   - Hız: Cloudflare challenge için maksimum 20sn bekleme (eski 45sn yerine),
- *     cache 2 saat, paralel istek desteği.
- *   - IMDb ID parametresi: hdfilmdelisi/vixolity ve carnoots için direkt kaynak kurar.
  *
  * CORS: * (Tizen TV'den çağrılabilir)
  * Engine: Express + Puppeteer (headless Chromium, Cloudflare bypass)
@@ -24,35 +26,39 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 const SITES = {
-  hdfilmdelisi: { base: 'https://hdfilmdelisi.one', search: '/api/search?q=', vixolity: true },
+  hdfilmdelisi: { base: 'https://hdfilmdelisi.one', search: '/?s=', vixolity: true },
   dizigom: { base: 'https://www.dizigom.news', search: '/ara?q=', detailMovie: '/film/{slug}', detailSeries: '/{slug}-{s}-sezon-{e}-bolum' },
   carnoots: { base: 'https://carnoots.com', video: 'https://video.carnoots.com/{slug}/s{s}/e{e}/master.m3u8' },
   /* Statik fetch ile çalışan siteler (yedek yol) */
   canlifilmizle: { base: 'https://canlifilmizle.com', search: '/?s=' },
+  filmizlefilmizle: { base: 'https://canlifilmizle.com', search: '/?s=' },
   pcfilmizle: { base: 'https://pcfilmizle.com', search: '/?s=' },
   filmgecesi: { base: 'https://www.filmgecesi.vip', search: '/?s=' },
-  filmmakinesi: { base: 'https://filmmakinesi.to', search: '/?s=' },
-  fullhdfilmizlesene: { base: 'https://www.fullhdfilmizlesene.net', search: '/?s=' },
+  filmmakinesi: { base: 'https://filmmakinesi.to', search: '/arama/?s=' },
+  fullhdfilmizlesene: { base: 'https://fullhdfilmizlesene.cc', search: '/arama/' },
   ultraiz: { base: 'https://ultraiz.net', search: '/?s=' },
+  ufilmizle: { base: 'https://ultraiz.net', search: '/?s=' },
   hdfilmizle: { base: 'https://www.hdfilmizle.live', search: null, sitemap: true },
-  lovefilmizle: { base: 'https://lovefilmizle.com', search: '/?s=' },
-  sinemacc: { base: 'https://sinemacc.com', search: '/?s=' },
-  turkcefilmler: { base: 'https://turkcefilmler.to', search: '/?s=' },
-  fixfullfilmizle: { base: 'https://fixfullfilmizle.com', search: '/?s=' },
-  filmifullizle: { base: 'https://filmifullizle.com', search: '/?s=' },
-  filmizlebabam: { base: 'https://filmizlebabam.com', search: '/?s=' },
-  filmizlehell: { base: 'https://filmizlehell.com', search: '/?s=' },
-  ddizi: { base: 'https://www.ddizi.tel', search: '/?s=' },
+  lovefilmizle: { base: 'https://lovefilmizle.net', search: '/?s=' },
+  sinemacc: { base: 'https://sinemacc.com', search: '/arama/?s=' },
+  turkcefilmler: { base: 'https://turkcefilmler.to', search: '/arama/?s=' },
+  fixfullfilmizle: { base: 'https://www.fixfullfilmizle.com', search: '/?s=' },
+  filmifullizle: { base: 'https://www.filmifullizle.news', search: '/?s=' },
+  filmizlebabam: { base: 'https://www.filmizlebabam.com', search: '/ara?q=' },
+  filmizlehell: { base: 'https://filmizlehell.net', search: '/arama?q=' },
+  ddizi: { base: 'https://www.ddizi.tel', search: '/arama/', searchPost: true },
   filmcibaba: { base: 'https://filmizle.ink', search: '/?s=' },
   hdfilmcehennemi: { base: 'https://www.hdfilmcehennemi.nl', search: '/?s=' },
+  cizgivedizi: { base: 'https://cizgivedizi.net', search: '/?s=' },
   /* Cloudflare engelli anime/çizgi dizi siteleri */
   animecix: { base: 'https://animecix.tv', search: '/arama?q=' },
   anizm: { base: 'https://anizm.net', search: '/arama?q=' },
-  cizgimax: { base: 'https://cizgimax.online', search: '/?s=' },
+  cizgimax: { base: 'https://cizgimax.online', search: '/?s=', cloudflare: true },
   kultfilmler: { base: 'https://kultfilmler.net', search: '/?s=' },
   sonanime: { base: 'https://sonanime.com', search: '/?s=' },
   tranimeizle: { base: 'https://www.tranimeizle.live', search: '/?s=' },
-  dizibox: { base: 'https://www.dizibox.live', search: '/?s=' }
+  dizibox: { base: 'https://www.dizibox.live', search: '/?s=' },
+  dizipal: { base: 'https://dizipal1587.com', search: '/?s=' }
 };
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -69,7 +75,7 @@ function getBrowser() {
   return browserPromise;
 }
 
-async function fetchPage(url, { waitMs = 2000, networkIdle = false, waitForSelector = null } = {}) {
+async function fetchPage(url, { waitMs = 2000, networkIdle = false, waitForSelector = null, postData = null } = {}) {
   const browser = await getBrowser();
   const page = await browser.newPage();
   await page.setUserAgent(UA);
@@ -78,7 +84,12 @@ async function fetchPage(url, { waitMs = 2000, networkIdle = false, waitForSelec
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
   try {
-    const resp = await page.goto(url, { waitUntil: networkIdle ? 'networkidle2' : 'domcontentloaded', timeout: 30000 });
+    let resp;
+    if (postData) {
+      resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000, method: 'POST', postData });
+    } else {
+      resp = await page.goto(url, { waitUntil: networkIdle ? 'networkidle2' : 'domcontentloaded', timeout: 30000 });
+    }
     /* Cloudflare challenge bekle (maks 20sn — eski 45sn yerine hızlı) */
     const t0 = Date.now();
     while (Date.now() - t0 < 20000) {
@@ -112,7 +123,6 @@ async function fetchDizigomPlayer(watchUrl, base) {
   });
   let playerInfo = null;
   try {
-    /* Player script isteklerini dinle: s.php?s=... ve core.js */
     const playerScripts = [];
     page.on('request', req => {
       const u = req.url();
@@ -121,21 +131,18 @@ async function fetchDizigomPlayer(watchUrl, base) {
       }
     });
     await page.goto(watchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    /* Cloudflare challenge bekle */
     const t0 = Date.now();
     while (Date.now() - t0 < 15000) {
       const title = await page.title().catch(() => '');
       if (title && !/just a moment|bir dakika|attention required|cloudflare/i.test(title)) break;
       await new Promise(r => setTimeout(r, 1200));
     }
-    /* networkidle2: player script yüklenip DOM'a inject olması için bekle */
     try { await page.waitForNetworkIdle({ idleTime: 1500, timeout: 12000 }); } catch (e) {}
     /* data-pv'yi DOM'dan çıkar (runtime'da set edilir, statik HTML'de yok) */
     const dataPv = await page.evaluate(() => {
       const el = document.querySelector('[data-pv]');
       return el ? el.getAttribute('data-pv') : null;
     }).catch(() => null);
-    /* Player script URL'lerini de topla */
     const coreScript = playerScripts.find(u => /\/(?:assets\/js\/core|e\/c)\.js/i.test(u));
     const sUrl = playerScripts.find(u => /\/assets\/js\/s\.php\?s=/i.test(u));
     playerInfo = { dataPv, coreScript, sUrl, finalUrl: page.url() };
@@ -151,7 +158,7 @@ function absUrl(u, base) {
   try { return new URL(u, base).href; } catch (e) { return ''; }
 }
 function isPlayerHost(u) {
-  const hosts = ['vidrame','hotstream','vixolity','playerx','oynat','vidmoly','sibnet','vk','mail.ru','myvi','fembed','gdrive','dailymotion','streamtape','doodstream','mixdrop','voe','upstream','files.im','rapidvid','cloudvideo','suat','wargamings','pl.'];
+  const hosts = ['vidrame','hotstream','vixolity','playerx','oynat','vidmoly','sibnet','vk','mail.ru','myvi','fembed','gdrive','dailymotion','streamtape','doodstream','mixdrop','voe','upstream','files.im','rapidvid','cloudvideo','suat','wargamings','pl.','ha.vixolity','video.carnoots'];
   try {
     const h = new URL(u).hostname.replace(/^www\./, '').toLowerCase();
     return hosts.some(s => h.indexOf(s) >= 0) || /\.(m3u8|mp4|mkv|webm)(\?|$|#)/i.test(u);
@@ -168,7 +175,7 @@ function extractSources(html, base) {
     seen[url] = 1;
     let t = type;
     if (!t) t = /\.m3u8(\?|$|#)/i.test(url) ? 'hls' : (/\.mp4(\?|$|#)/i.test(url) ? 'mp4' : 'iframe');
-    sources.push({ provider: label || new URL(url).hostname, url, type: t });
+    sources.push({ provider: label || (() => { try { return new URL(url).hostname; } catch (e) { return 'player'; } })(), url, type: t });
   }
   let m;
   const iframeRe = /<iframe\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']/gi;
@@ -211,7 +218,10 @@ function pickResult(html, base, names, year, type) {
     if (/^\//.test(href)) href = origin + href;
     if (!href.startsWith(origin)) continue;
     const path = new URL(href).pathname;
-    if (/^\/(?:film|dizi|izle|diziler|category|tag|page|wp-|sitemap|ara|search)\b/i.test(path)) continue;
+    if (/^\/(?:film|dizi|izle|diziler|category|tag|page|wp-|sitemap|ara|search|arama)\b/i.test(path)) {
+      /* /film/ ve /diziler/ path'leri geçerli içerik sayfaları — hariç tutma */
+      if (!/^\/(?:film|dizi|diziler|izle)\//i.test(path)) continue;
+    }
     if (path === '/' || path.length < 3) continue;
     const text = m[2].replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
     if (!text || text.length < 2) continue;
@@ -228,18 +238,20 @@ function pickResult(html, base, names, year, type) {
   for (const c of results) {
     const t = norm(c.text);
     let score = 0;
-    for (const n of names) {
+    names.forEach((n, idx) => {
       const w = norm(n);
-      if (!w) continue;
-      if (t === w) score = Math.max(score, 100);
-      else if (t.indexOf(w) >= 0 || w.indexOf(t) >= 0) score = Math.max(score, 80);
+      if (!w) return;
+      /* İlk sorgu (IMDb ID hariç, orijinal isim) en yüksek öncelik */
+      const weight = idx === 0 ? 1.2 : 1;
+      if (t === w) score = Math.max(score, 100 * weight);
+      else if (t.indexOf(w) >= 0 || w.indexOf(t) >= 0) score = Math.max(score, 80 * weight);
       else {
         const a = w.split(' '), b = t.split(' ');
         let n2 = 0;
         a.forEach(x => { if (x.length > 2 && b.indexOf(x) >= 0) n2++; });
-        score = Math.max(score, 62 * n2 / Math.max(1, Math.min(a.length, b.length)));
+        score = Math.max(score, 62 * n2 / Math.max(1, Math.min(a.length, b.length)) * weight);
       }
-    }
+    });
     if (year && c.year) score += Math.abs(c.year - year) <= 1 ? 12 : -8;
     if (score > bestScore) { bestScore = score; best = c; }
   }
@@ -268,6 +280,8 @@ app.get('/find/:site', async (req, res) => {
   const cfg = SITES[siteId];
   if (!cfg) return res.status(404).json({ error: 'Bilinmeyen site: ' + siteId });
 
+  /* names sırası: server'a gelen names zaten orijinal → TR sırasında.
+     IMDb ID ayrı imdb parametresi olarak gelir. */
   const names = (req.query.names || '').split('|').map(s => s.trim()).filter(Boolean);
   const year = req.query.year ? Number(req.query.year) : null;
   const type = req.query.type === 'tv' ? 'tv' : 'movie';
@@ -314,15 +328,29 @@ app.get('/find/:site', async (req, res) => {
       return res.json(result);
     }
 
-    /* 5) Generic: ara → en iyi sonucu seç → detay sayfasını aç → kaynak çıkar */
-    const searchPath = cfg.search || '/?s=';
+    /* 5) ddizi: POST ile arama */
+    if (cfg.searchPost) {
+      const result = await findPostSite(cfg, names, year, type, 'arama=');
+      cacheSet(cacheKey, result);
+      return res.json(result);
+    }
+
+    /* 6) Generic: ara → en iyi sonucu seç → detay sayfasını aç → kaynak çıkar */
+    if (!cfg.search) {
+      const result = { site: siteId, found: false, error: 'bu site için arama yolu tanımlı değil', sources: [] };
+      cacheSet(cacheKey, result);
+      return res.json(result);
+    }
+    const searchPath = cfg.search;
     const searchUrl = cfg.base + searchPath + encodeURIComponent(names[0]);
     let searchHtml;
     try {
       const r = await fetchPage(searchUrl, { waitMs: 1500 });
       searchHtml = r.html;
     } catch (err) {
-      return res.json({ site: siteId, found: false, error: 'arama başarısız: ' + err.message, sources: [] });
+      const result = { site: siteId, found: false, error: 'arama başarısız: ' + err.message, sources: [] };
+      cacheSet(cacheKey, result);
+      return res.json(result);
     }
 
     const best = pickResult(searchHtml, cfg.base, names, year, type);
@@ -357,11 +385,8 @@ app.get('/find/:site', async (req, res) => {
   }
 });
 
-/* Dizigom: data-pv düzeltmesi — Puppeteer ile runtime'da player script bekle.
-   Statik scrape'te data-pv görünmüyor çünkü player script runtime'da inject ediliyor.
-   Puppeteer sayfayı açar, player script'in yüklenmesini bekler, sonra DOM'dan çıkarır. */
+/* Dizigom: data-pv düzeltmesi — Puppeteer ile runtime'da player script bekle. */
 async function findDizigom(cfg, names, year, type, s, e) {
-  /* 1) Slug bul (arama) */
   const searchUrl = cfg.base + cfg.search + encodeURIComponent(names[0]);
   let searchHtml;
   try {
@@ -373,7 +398,6 @@ async function findDizigom(cfg, names, year, type, s, e) {
   const best = pickResult(searchHtml, cfg.base, names, year, type);
   if (!best) return { site: 'dizigom', found: false, sources: [] };
 
-  /* 2) Detay sayfasını Puppeteer ile aç, player script bekle, data-pv çıkar */
   const watchUrl = type === 'tv'
     ? cfg.base + '/' + best.slug + '-' + s + '-sezon-' + e + '-bolum/'
     : cfg.base + '/film/' + best.slug;
@@ -383,7 +407,6 @@ async function findDizigom(cfg, names, year, type, s, e) {
     return { site: 'dizigom', found: true, match: { slug: best.slug, title: best.text, year: best.year }, watchUrl: watchUrl, fastNote: 'sayfada data-pv bulunamadı (player script yüklenmedi)', sources: [] };
   }
 
-  /* 3) s.php?s=dataPv → player sayfası → stream URL */
   const coreScript = playerInfo.coreScript;
   if (!coreScript) {
     return { site: 'dizigom', found: true, match: { slug: best.slug, title: best.text, year: best.year }, watchUrl: watchUrl, fastNote: 'core.js bulunamadı', sources: [] };
@@ -399,14 +422,12 @@ async function findDizigom(cfg, names, year, type, s, e) {
     return { site: 'dizigom', found: true, match: { slug: best.slug, title: best.text, year: best.year }, watchUrl: watchUrl, fastNote: 'player sayfası açılamadı: ' + err.message, sources: [] };
   }
 
-  /* video no çıkar */
   const vm = String(spHtml).match(/api\/(?:stream|token|thumb)\.php\?v=([0-9a-f]{16,64})/i);
   if (!vm) {
     return { site: 'dizigom', found: true, match: { slug: best.slug, title: best.text, year: best.year }, watchUrl: watchUrl, fastNote: 'player sayfasında video no yok', sources: [] };
   }
   const V = vm[1];
 
-  /* token al */
   let tok = null;
   try {
     const r = await fetchPage(pOrigin + '/api/token.php?v=' + V, { waitMs: 500 });
@@ -425,6 +446,30 @@ async function findDizigom(cfg, names, year, type, s, e) {
     watchUrl: watchUrl,
     sources: [{ provider: 'dizigom', url: link, type: 'hls', referer: sUrl, origin: pOrigin }]
   };
+}
+
+/* POST ile arama yapan siteler için (ddizi) */
+async function findPostSite(cfg, names, year, type, paramName) {
+  const searchUrl = cfg.base + cfg.search;
+  let searchHtml;
+  try {
+    const r = await fetchPage(searchUrl, { waitMs: 1500, postData: paramName + encodeURIComponent(names[0]) });
+    searchHtml = r.html;
+  } catch (err) {
+    return { site: cfg.base, found: false, error: 'arama: ' + err.message, sources: [] };
+  }
+  const best = pickResult(searchHtml, cfg.base, names, year, type);
+  if (!best) return { site: cfg.base, found: false, sources: [] };
+
+  let detailHtml;
+  try {
+    const r = await fetchPage(best.url, { waitMs: 2500, networkIdle: true });
+    detailHtml = r.html;
+  } catch (err) {
+    return { site: cfg.base, found: true, match: { slug: best.slug, title: best.text, year: best.year }, watchUrl: best.url, fastNote: 'detay sayfası açılamadı: ' + err.message, sources: [] };
+  }
+  const sources = extractSources(detailHtml, cfg.base);
+  return { site: cfg.base, found: true, match: { slug: best.slug, title: best.text, year: best.year }, watchUrl: best.url, sources: sources.map(s => ({ provider: s.provider, url: s.url, type: s.type, referer: '', origin: cfg.base })) };
 }
 
 async function findHdfilmizle(cfg, names, year, type) {
@@ -455,18 +500,19 @@ async function findHdfilmizle(cfg, names, year, type) {
     const slugTitle = norm(item.slug.replace(/[-_]+/g, ' ').replace(/\bizle\b/gi, '').replace(/\bhd\b/gi, '').trim());
     if (!slugTitle) continue;
     let score = 0;
-    for (const n of names) {
+    names.forEach((n, idx) => {
       const w = norm(n);
-      if (!w) continue;
-      if (slugTitle === w) score = Math.max(score, 100);
-      else if (slugTitle.indexOf(w) >= 0 || w.indexOf(slugTitle) >= 0) score = Math.max(score, 80);
+      if (!w) return;
+      const weight = idx === 0 ? 1.2 : 1;
+      if (slugTitle === w) score = Math.max(score, 100 * weight);
+      else if (slugTitle.indexOf(w) >= 0 || w.indexOf(slugTitle) >= 0) score = Math.max(score, 80 * weight);
       else {
         const a = w.split(' '), b = slugTitle.split(' ');
         let n2 = 0;
         a.forEach(x => { if (x.length > 2 && b.indexOf(x) >= 0) n2++; });
-        score = Math.max(score, 62 * n2 / Math.max(1, Math.min(a.length, b.length)));
+        score = Math.max(score, 62 * n2 / Math.max(1, Math.min(a.length, b.length)) * weight);
       }
-    }
+    });
     if (score > bestScore) { bestScore = score; best = item; }
   }
   if (!best || bestScore < 50) return { site: 'hdfilmizle', found: false, sources: [] };
