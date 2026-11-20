@@ -1,7 +1,7 @@
 {
   "name": "mm93-render-server",
-  "version": "1.8.1",
-  "description": "MultiMedia render server — tüm siteler için Puppeteer-tabanlı kaynak çözücü. Cloudflare engelli siteler dahil. Dizigom data-pv düzeltmesi içerir.",
+  "version": "1.9.2",
+  "description": "MultiMedia render server v1.9.2 — statik fetch öncelikli (hızlı), Puppeteer fallback (Cloudflare). Dockerfile ile Chromium kurulu. TR IP spoofing (451 legal engel). pickResult güçlendirildi (slug + title + type filtre).",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
